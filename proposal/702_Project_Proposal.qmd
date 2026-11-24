@@ -1,0 +1,644 @@
+---
+title: "IDS 702 Project Proposal"
+author: "Nada Ali, Chen Liu, Viola Thadtanone"
+format: pdf
+editor: visual
+execute:
+  echo: FALSE
+  message: FALSE
+  warning: FALSE
+---
+
+```{r}
+#| include: false
+# ============================================================
+# SETUP: packages and raw data for Option 1
+# All Option 1 data files live in the "data/" folder next to this qmd
+# ============================================================
+library(tidyverse)
+library(gtsummary)
+library(haven)   # used by Option 2 to read the HRS Stata file
+
+unemployment <- read.csv("data/unemployment_ls.csv")  # IMF Labor Statistics (LS), quarterly
+aiax         <- read.csv("data/aiax.csv")             # IMF AI Adoption Index (AIAX), monthly
+weo          <- read.csv("data/weo.csv")              # IMF World Economic Outlook (WEO), annual
+```
+
+```{r}
+#| include: false
+# ============================================================
+# OPTION 1 DATA PREP 1: unemployment rate (wide -> long, country-quarter)
+# ============================================================
+
+# Missingness check (for reference only, not shown in the PDF)
+colSums(is.na(unemployment))
+table(rowSums(is.na(unemployment[, 9:20])))
+
+# Reshape quarterly columns (X2023.Q1 ... X2025.Q4) into rows
+unemp_long <- unemployment %>%
+  pivot_longer(cols = 9:20, names_to = "quarter", values_to = "unemployment_rate") %>%
+  mutate(
+    iso3 = substr(SERIES_CODE, 1, 3),                 # ISO3 country code, e.g. "BRA"
+    # "X2023.Q1": year = characters 2-5, quarter number = character 8
+    year = as.integer(substr(quarter, 2, 5)),
+    qtr  = as.integer(substr(quarter, 8, 8))
+  )
+```
+
+```{r}
+#| include: false
+# ============================================================
+# OPTION 1 DATA PREP 2: AI Adoption Index (monthly -> quarterly)
+# Keep the three country-level monthly indicators and put each in its own column
+# ============================================================
+aiax_q <- aiax %>%
+  filter(FREQUENCY == "Monthly") %>%
+  mutate(
+    iso3 = sub("\\..*", "", SERIES_CODE),             # everything before the first "."
+    ai_var = case_when(
+      INDICATOR == "Share of Emerging AI" ~ "ai_share",
+      grepl("low-exposure",  INDICATOR, ignore.case = TRUE) ~ "ai_share_low_exp",
+      grepl("high-exposure", INDICATOR, ignore.case = TRUE) ~ "ai_share_high_exp"
+    )
+  ) %>%
+  dplyr::select(iso3, ai_var, matches("^X\\d{4}\\.M\\d{2}$")) %>%   # monthly columns only
+  pivot_longer(-c(iso3, ai_var), names_to = "month_label", values_to = "value") %>%
+  mutate(
+    # "X2023.M01": year = characters 2-5, month = characters 8-9
+    year  = as.integer(substr(month_label, 2, 5)),
+    month = as.integer(substr(month_label, 8, 9)),
+    qtr   = ceiling(month / 3)                        # months 1-3 -> Q1, etc.
+  ) %>%
+  group_by(iso3, ai_var, year, qtr) %>%
+  summarise(value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = ai_var, values_from = value) %>%
+  filter(!is.na(ai_share))                            # drop quarters with no overall AI data
+```
+
+```{r}
+#| include: false
+# ============================================================
+# OPTION 1 DATA PREP 3: WEO macro variables (one row per country-year)
+# ============================================================
+weo_clean <- weo %>%
+  mutate(
+    iso3 = sub("\\..*", "", SERIES_CODE),             # everything before the first "."
+    indicator = case_when(
+      grepl("NGDP_RPCH", SERIES_CODE) ~ "gdp_growth",       # real GDP growth (%)
+      grepl("PCPIPCH",   SERIES_CODE) ~ "inflation",        # CPI inflation, period average (%)
+      grepl("NGDPDPC",   SERIES_CODE) ~ "gdp_per_capita"    # GDP per capita, current USD
+    )
+  ) %>%
+  dplyr::select(iso3, indicator, starts_with("X")) %>%
+  pivot_longer(starts_with("X"), names_to = "year", values_to = "value") %>%
+  mutate(year = as.integer(substr(year, 2, 5))) %>%
+  pivot_wider(names_from = indicator, values_from = value)
+
+# IMF WEO advanced economies (ISO3 codes)
+# NOTE: verify against the current WEO country classification before final use
+advanced_iso3 <- c(
+  "AND", "AUS", "AUT", "BEL", "CAN", "HRV", "CYP", "CZE", "DNK", "EST",
+  "FIN", "FRA", "DEU", "GRC", "HKG", "ISL", "IRL", "ISR", "ITA", "JPN",
+  "KOR", "LVA", "LTU", "LUX", "MAC", "MLT", "NLD", "NZL", "NOR", "PRT",
+  "PRI", "SMR", "SGP", "SVK", "SVN", "ESP", "SWE", "CHE", "TWN", "GBR",
+  "USA"
+)
+```
+
+```{r}
+#| include: false
+# ============================================================
+# OPTION 1 DATA PREP 4: merge into the analysis dataset (country-quarter)
+# ============================================================
+analysis_df <- unemp_long %>%
+  dplyr::select(iso3, COUNTRY, year, qtr, unemployment_rate) %>%
+  filter(!is.na(unemployment_rate)) %>%
+  inner_join(aiax_q, by = c("iso3", "year", "qtr")) %>%   # keep country-quarters in both
+  left_join(weo_clean, by = c("iso3", "year")) %>%        # add annual macro variables
+  mutate(
+    economy_group = if_else(iso3 %in% advanced_iso3,
+                            "Advanced", "Emerging/Developing"),
+    qtr = factor(qtr)                                     # quarter as categorical (seasonality)
+  )
+
+# Quick checks (not shown in the PDF)
+nrow(analysis_df)                    # expected: 826
+n_distinct(analysis_df$iso3)         # expected: 82
+analysis_df %>% count(economy_group)
+
+# Countries behind extreme values
+analysis_df %>% filter(ai_share > 5) %>% distinct(COUNTRY, economy_group)
+analysis_df %>% filter(unemployment_rate > 20) %>% distinct(COUNTRY)
+```
+
+## Project Proposal/Statistical Analysis Plan
+
+Link to your team's Github Repo: <https://github.com/chen04301121-cmyk/ids702-ai-unemployment>
+
+### Dataset Option 1
+
+------------------------------------------------------------------------
+
+**Project Title:** AI Adoption in Job Postings and Unemployment Across Economies
+
+**Data citation (use APA formatting or something similar):**
+
+International Monetary Fund. (2026). *AI Adoption Index (AIAX)* \[Data set\]. IMF Data. Retrieved November 4, 2026, from <https://data.imf.org/en/datasets/IMF.STA:WPAIAX>
+
+International Monetary Fund. (n.d.). *Labor Statistics (LS)* \[Data set\]. IMF Data. Retrieved November 3, 2026, from <https://data.imf.org/en/datasets/IMF.STA:LS>
+
+International Monetary Fund. (n.d.). *World Economic Outlook (WEO)* \[Data set\]. IMF Data. Retrieved November 4, 2026, from <https://data.imf.org/en/datasets/IMF.RES:WEO>
+
+The AIAX dataset accompanies: Ando, S., Kirti, D., Lin, W., et al. (2026). *How is labor demand changing as AI improves? New global evidence* (IMF Working Paper). International Monetary Fund.
+
+**Original data collection date (when was the dataset published?):** The AIAX dataset was published by the International Monetary Fund (IMF) on November 2, 2026 and contains monthly economy-level indicators for 110 economies from January 2023 to April 2026, derived from online job postings. The Labor Statistics (LS) dataset compiles labor force, employment, and unemployment statistics reported by national statistical organizations; we use the latest vintage of quarterly unemployment rates for 2023 Q1 to 2025 Q4. The WEO dataset provides annual macroeconomic indicators; we use the latest vintage for 2023 to 2025.
+
+**Data pull date (when did you download the data you will use?):** IMF Labor Statistics (LS): November 3, 2026; IMF AI Adoption Index (AIAX) and World Economic Outlook (WEO): November 4, 2026.
+
+------------------------------------------------------------------------
+
+#### 1 Research Question
+
+This proposal aims to examine the relationship between growing demand for artificial intelligence (AI) skills and unemployment rates across economies.
+
+**Primary research question:** Among 82 economies observed quarterly from 2023 to 2025, is a higher share of online job postings requiring emerging AI skills associated with the unemployment rate, after adjusting for GDP growth, inflation, GDP per capita, year, and season? Does this association differ between advanced economies and emerging/developing economies?
+
+#### 2 Study Population
+
+The AIAX dataset measures the prevalence of emerging AI skills in online job postings (collected by Lightcast and processed by the IMF) across 110 economies, with monthly economy-level observations. The Labor Statistics (LS) dataset provides labor market indicators, including unemployment rates, that originate from national statistical organizations and are compiled by the IMF. The WEO dataset provides annual macroeconomic indicators (real GDP growth, inflation, and GDP per capita) compiled by IMF.
+
+The unit of observation is an **economy-quarter**, with each observation capturing macroeconomic indicators (e.g. unemployment rate and AI skill demand) for that particular country in a given quarter. We aggregate the monthly AI indicators to quarterly averages and assign annual WEO values to all quarters of the same year. After merging the three sources by ISO country code, year, and quarter, the analytic sample contains 826 economy-quarter observations from 82 economies (41 classified as advanced and 41 as emerging/developing economies by the IMF) between 2023 Q1 and 2025 Q4. Economies without both unemployment and AI data in a given quarter are excluded.
+
+#### 3 Outcomes, Exposures, and Additional Variables of Interest
+
+### 3.1 Primary Outcome(s)
+
++----------------------+--------------------------------------------------------------------------+-------------------------------------------------------------------------------------------+
+| Variable             | Description                                                              | Coding specification                                                                      |
++======================+==========================================================================+===========================================================================================+
+| Unemployment rate    | Percentage of the labor force that is unemployed, by economy and quarter | Continuous (%); higher values indicate higher unemployment. Log-transformed in the model. |
++----------------------+--------------------------------------------------------------------------+-------------------------------------------------------------------------------------------+
+
+### 3.2 Primary Independent Variable(s)
+
++----------------------+-----------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------+
+| Variable             | Description                                                                                                     | Coding specification                                                      |
++======================+=================================================================================================================+===========================================================================+
+| AI share             | Share of online job postings requiring emerging AI skills, all occupations; quarterly average of monthly values | Continuous (%); higher values indicate greater demand for AI skills.      |
++----------------------+-----------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------+
+| Economy group        | IMF economy classification                                                                                      | Categorical: Advanced economy vs. Emerging/developing economy (reference) |
++----------------------+-----------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------+
+
+### 3.3 Additional Variables of Interest
+
++----------------------+----------------------------------+--------------------------------------------------------+
+| Variable             | Description                      | Coding specification                                   |
++======================+==================================+========================================================+
+| GDP growth           | Real GDP growth, constant prices | Continuous; annual percent change (%)                  |
++----------------------+----------------------------------+--------------------------------------------------------+
+| Inflation            | CPI inflation, period average    | Continuous; annual percent change (%)                  |
++----------------------+----------------------------------+--------------------------------------------------------+
+| GDP per capita       | GDP per capita, current prices   | Continuous; U.S. dollars; log-transformed in the model |
++----------------------+----------------------------------+--------------------------------------------------------+
+| Year                 | Calendar year                    | Categorical: 2023 (reference), 2024, 2025              |
++----------------------+----------------------------------+--------------------------------------------------------+
+| Quarter              | Calendar quarter                 | Categorical: Q1 (reference), Q2, Q3, Q4                |
++----------------------+----------------------------------+--------------------------------------------------------+
+| Economy identifier   | ISO 3-letter economy code        | Categorical; used for the random intercept             |
++----------------------+----------------------------------+--------------------------------------------------------+
+
+#### 4 Statistical Analysis Plan
+
+**4.1 Exploratory Data Analysis**
+
+The outcome (quarterly unemployment rate) is continuous, so we will summarize it with descriptive statistics and a histogram to assess its distribution and identify extreme values. Because our primary independent variable (the share of job postings requiring emerging AI skills) is also continuous, we will use a scatter plot of unemployment against AI adoption, with points colored and separate linear fits drawn by economy group (advanced vs. emerging/developing), to explore both the main relationship and the planned interaction.
+
+**4.2 Statistical Model**
+
+We will fit a linear mixed-effects model with a random intercept for each economy:
+
+$$\begin{aligned}
+\log(\text{Unemp}_{it}) = \; & \beta_0 + \beta_1 \text{AI}_{it} + \beta_2 \text{Adv}_i + \beta_3 \left[\text{AI}_{it} \times \text{Adv}_i\right] \\
+& + \beta_4 \text{GDPgrowth}_{it} + \beta_5 \text{Inflation}_{it} + \beta_6 \log(\text{GDPpc}_{it}) \\
+& + \sum_{y} \gamma_y \text{Year}_{yt} + \sum_{q} \delta_q \text{Quarter}_{qt} + u_i + \varepsilon_{it}
+\end{aligned}$$
+
+$$u_i \sim N(0, \sigma_u^2), \qquad \varepsilon_{it} \sim N(0, \sigma^2)$$
+
+where:
+
+- $i$ indexes economies and $t$ indexes quarters (2023 Q1 to 2025 Q4).
+- $\text{Unemp}_{it}$ is the unemployment rate (%) of economy $i$ in quarter $t$.
+- $\text{AI}_{it}$ is the quarterly average share of online job postings requiring emerging AI skills (%).
+- $\text{Adv}_i$ equals 1 if economy $i$ is classified by the IMF as an advanced economy and 0 if it is an emerging/developing economy (reference group).
+- $\text{GDPgrowth}_{it}$ is annual real GDP growth (%), $\text{Inflation}_{it}$ is annual average CPI inflation (%), and $\text{GDPpc}_{it}$ is GDP per capita in current U.S. dollars; these annual values are assigned to all quarters of the same year.
+- $\text{Year}_{yt}$ and $\text{Quarter}_{qt}$ are indicator variables for calendar year (reference: 2023) and quarter (reference: Q1).
+- $\beta_0$ is the intercept; $\beta_1$ is the association between AI adoption and log unemployment among emerging/developing economies; $\beta_2$ is the difference in log unemployment between advanced and emerging/developing economies when $AI_{it} = 0$; $\beta_3$ is the difference in the AI slope between advanced and emerging/developing economies, so the AI slope among advanced economies is $\beta_1 + \beta_3$; $\beta_4$ to $\beta_6$ are associations with the macroeconomic covariates; $\gamma_y$ and $\delta_q$ capture common year and seasonal effects.
+- $u_i$ is the random intercept for economy $i$, representing persistent differences in baseline unemployment across economies, and $\varepsilon_{it}$ is the residual error.
+
+Because the outcome is log-transformed, $100 \times (e^{\beta} - 1)$ gives the approximate percent change in the unemployment rate associated with a one-unit increase in a predictor, holding other variables constant.
+
+**4.2 Rationale for the statistical model**
+
+The outcome is continuous, and our goal is inference about the adjusted association between AI adoption and unemployment, so a linear regression framework is appropriate.
+
+Our data have a repeated-measures structure: each economy contributes up to 12 quarterly observations, and observations from the same economy are likely to be correlated (e.g., South Africa has persistently high unemployment). Ordinary least squares would treat these observations as independent and understate standard errors. A random intercept for each economy accounts for this within-economy correlation. The interaction term tests whether the association between AI adoption and unemployment differs between advanced and emerging/developing economies, and we include macroeconomic covariates because Table 1 shows that the two groups differ systematically in GDP growth, inflation, and income, which may also affect unemployment. If mixed-effects models are not appropriate for this course, we will instead fit an ordinary linear regression with cluster-robust standard errors by economy.
+
+**4.3 Model Assumptions**
+
+1.  **Linearity:** log unemployment is linearly related to each continuous predictor (on the scales used in the model).
+2.  **Independence:** after accounting for the economy-level random intercept, residuals are independent across observations. Residuals within the same economy may still be serially correlated across consecutive quarters, which we will check.
+3.  **Normality:** residuals $\varepsilon_{it}$ and random intercepts $u_i$ are approximately normally distributed.
+4.  **Equal variance:** residuals have constant variance across fitted values and across economy groups.
+5.  **No severe multicollinearity** among predictors.
+
+**4.4 Model Assessment**
+
+- **Linearity and equal variance:** plot residuals against fitted values and against each continuous predictor, separately by economy group.
+- **Normality:** Q-Q plots of the residuals and of the estimated random intercepts.
+- **Independence:** examine the autocorrelation of residuals within economies across consecutive quarters.
+- **Multicollinearity:** variance inflation factors (VIFs) for the fixed effects.
+- **Influential observations:** identify influential economies by refitting the model leaving out one economy at a time and by examining influence diagnostics; we will pay particular attention to the small economies with very high AI shares and to extreme inflation values (e.g., Argentina), and will consider transforming or capping inflation if needed.
+- **Interaction and model fit:** compare the models with and without the interaction term using a likelihood ratio test (fit by maximum likelihood), and report the intraclass correlation and marginal and conditional $R^2$.
+
+\newpage
+
+#### Exploratory Data Analysis
+
+```{r}
+# Snapshot of the analysis dataset (one row per economy-quarter)
+glimpse(analysis_df)
+```
+
+```{r}
+#| fig-height: 3
+#| fig-width: 6
+# Histogram of the outcome in the analytic sample
+ggplot(analysis_df, aes(x = unemployment_rate)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(
+    title = "Distribution of Quarterly Unemployment Rates, 2023-2025",
+    x = "Unemployment rate (%)",
+    y = "Number of economy-quarters"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+#| fig-height: 3
+#| fig-width: 6
+# Key relationship on log scales (both variables are right-skewed)
+# log1p = log(1 + x), which handles AI shares equal to 0
+# Separate fitted lines by economy group preview the planned interaction
+ggplot(analysis_df, aes(x = ai_share, y = unemployment_rate, color = economy_group)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", se = TRUE) +
+  scale_x_continuous(trans = "log1p", breaks = c(0, 0.5, 1, 2, 5, 10, 20)) +
+  scale_y_log10() +
+  labs(
+    title = "AI Adoption in Job Postings and Unemployment Rate",
+    x = "Share of job postings requiring emerging AI skills (%, log scale)",
+    y = "Unemployment rate (%, log scale)",
+    color = "Economy group"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Table 1: descriptive statistics by economy group
+analysis_df %>%
+  dplyr::select(unemployment_rate, ai_share, ai_share_high_exp, ai_share_low_exp,
+                gdp_growth, inflation, gdp_per_capita, economy_group) %>%
+  tbl_summary(
+    by = economy_group,
+    statistic = all_continuous() ~ "{median} ({p25}, {p75})",
+    digits = all_continuous() ~ 2,
+    label = list(
+      unemployment_rate ~ "Unemployment rate (%)",
+      ai_share          ~ "AI share, all occupations (%)",
+      ai_share_high_exp ~ "AI share, high-exposure occupations (%)",
+      ai_share_low_exp  ~ "AI share, low-exposure occupations (%)",
+      gdp_growth        ~ "Real GDP growth (%)",
+      inflation         ~ "Inflation (%)",
+      gdp_per_capita    ~ "GDP per capita (USD)"
+    ),
+    missing_text = "Missing"
+  ) %>%
+  add_overall() %>%
+  as_kable(caption = "Table 1. Median (IQR) of key variables by economy group")
+
+```
+
+Table 1: Summary statistics for variables used in the analysis in Option 1
+
+**Outcome.** The analytic sample contains 826 economy-quarter observations from 82 economies (403 from advanced economies and 423 from emerging/developing economies) between 2023 and 2025. The median quarterly unemployment rate is 5.17% (IQR: 3.60–7.39%). The distribution is right-skewed, with a small number of observations above 20% from South Africa and Botswana, two economies with well-documented structural unemployment.
+
+**Key relationship.** The share of job postings requiring emerging AI skills is also highly right-skewed: most observations are below 2%, while a few smaller economies (e.g., Cyprus, Slovenia, Latvia, Bolivia, Bosnia and Herzegovina, and North Macedonia) exceed 5%. Because these economies have relatively small online job-posting markets, their high values may partly reflect measurement noise.
+
+**Covariates.** Advanced economies have more than twice the median AI share of emerging/developing economies (0.22% vs. 0.09%), but they also differ systematically in GDP growth, inflation, and GDP per capita (Table 1). This highlights the need to adjust for these macroeconomic variables as potential confounders.
+
+\newpage
+
+### Dataset Option 2
+
+------------------------------------------------------------------------
+
+**Project Title:** Remember Me: Is Better Sleep Associated with Better Cognition?
+
+**Data citation (use APA formatting or something similar):** Health and Retirement Study. (2026). *RAND HRS longitudinal file 2022 (Version 2).* University of Michigan. <https://hrsdata.isr.umich.edu/data-products/rand-hrs-longitudinal-file-2022>
+
+**Original data collection date (when was the dataset published?):** Oct 2026
+
+**Data pull date (when did you download the data you will use?):** 4 Nov 2026
+
+------------------------------------------------------------------------
+
+#### 1 Research Question
+
+How do cognitive scores differ across high, medium, and low sleep quality, after accounting for age and education, and does the association between sleep quality and cognitive performance vary by age?
+
+#### 2 Study Population
+
+The observation unit is an individual respondent in the Health and Retirement Study (HRS) across 16 waves. The study is a longitudinal household survey conducted by the University of Michigan's Institute for Social Research and collects repeated survey information on health, cognition, employment, finances, and other aspects of aging in the United States.
+
+For this analysis, we will focus on the data in the latest wave 16 in 2022.
+
+#### 3 Outcomes, Exposures, and Additional Variables of Interest
+
+3.1 Primary Outcome(s)
+
++-----------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------+
+| Variable Name   | Description                                                                                                                                                            | Coding specification                        |
++=================+========================================================================================================================================================================+=============================================+
+| Cognitive Score | Cognitive Score combines multiple cognitive abilities testing including word recall, serial 7s, and backward counting, where higher scores indicate better performance | 0 - 27, where                               |
+|                 |                                                                                                                                                                        |                                             |
+|                 |                                                                                                                                                                        | 0 = Lowest possible cognitive performance   |
+|                 |                                                                                                                                                                        |                                             |
+|                 |                                                                                                                                                                        | 27 = Highest possible cognitive performance |
++-----------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------+
+
+3.2 Primary Independent Variable(s)
+
++---------------+-------------------------------------------------------------------------------------+-----------------------------+
+| Variable Name | Description                                                                         | Coding specification        |
++===============+=====================================================================================+=============================+
+| Sleep Quality | Sleep quality indicates how often respondents report feeling rested in the morning. | 1 = Low (Rarely/never)      |
+|               |                                                                                     |                             |
+|               |                                                                                     | 2 = Medium (Sometimes)      |
+|               |                                                                                     |                             |
+|               |                                                                                     | 3 = High (Most of the time) |
++---------------+-------------------------------------------------------------------------------------+-----------------------------+
+
+3.3 Additional Variables of Interest (including potential confounders)
+
++---------------+---------------------------------+----------------------------+
+| Variable Name | Description                     | Coding specification       |
++===============+=================================+============================+
+| Age           | Age is measured in years        | Continuous; Numerical      |
++---------------+---------------------------------+----------------------------+
+| Education     | Respondent's level of education | Categorical;\              |
+|               |                                 | 1 = Less than high school\ |
+|               |                                 | 2 = GED\                   |
+|               |                                 | 3 = High school graduate\  |
+|               |                                 | 4 = Some college\          |
+|               |                                 | 5 = College and above      |
++---------------+---------------------------------+----------------------------+
+
+#### 4 Statistical Analysis Plan
+
+**4.1 Exploratory Data Analysis**
+
+Cognitive score is a continuous variable ranging from 0–27, so we will use a histogram to examine its distribution. Sleep quality is a categorical factor with three levels, so we will compare cognitive score distributions across sleep-quality groups using boxplots.
+
+We will also examine the distributions of age and education and use summary statistics to describe the sample. For our hypothesis, we assume that respondents who report better sleep quality will have higher cognitive scores. It is also expected that this relationship may differ by age, while accounting for education, since cognitive performance generally varies across age and educational background.
+
+**4.2 Statistical Model (write in mathematical notation and define each term)**
+
+$$
+\begin{aligned}
+\text{CognitiveScore}_i
+=&\ \beta_0
++ \beta_1 \text{Sleep\_M}_i
++ \beta_2 \text{Sleep\_H}_i
++ \beta_3 \text{Age}_i \\
+&+ \beta_4 \text{GED}_i
++ \beta_5 \text{HighSchool}_i
++ \beta_6 \text{SomeCollege}_i
++ \beta_7 \text{CollegeAbove}_i \\
+&+ \beta_8(\text{Sleep\_M}_i \times \text{Age}_i)
++ \beta_9(\text{Sleep\_H}_i \times \text{Age}_i)
++ \epsilon_i
+\end{aligned}
+$$
+
+Where:
+
+- $\text{CognitiveScore}_i$ = Cognitive score for respondent $i$, ranging from 0 to 27.
+- $\text{Sleep\_M}_i$ = 1 if respondent $i$ has **medium sleep quality**, 0 otherwise.
+- $\text{Sleep\_H}_i$ = 1 if respondent $i$ has **high sleep quality**, 0 otherwise.
+- $\text{Age}_i$ = Respondent's age in years.
+- $\text{GED}_i$ = 1 if respondent $i$ has a GED, 0 otherwise.
+- $\text{HighSchool}_i$ = 1 if respondent $i$ is a high school graduate, 0 otherwise.
+- $\text{SomeCollege}_i$ = 1 if respondent $i$ has some college education, 0 otherwise.
+- $\text{CollegeAbove}_i$ = 1 if respondent $i$ has college education or above, 0 otherwise.
+- $\text{Sleep\_M}_i \times \text{Age}_i$ = Interaction between medium sleep quality and age.
+- $\text{Sleep\_H}_i \times \text{Age}_i$ = Interaction between high sleep quality and age.
+- $\epsilon_i$ = Error term for respondent $i$.
+
+**4.2 Rationale for the statistical model**
+
+We will use multiple linear regression because the outcome, cognitive score, is a numeric variable ranging from 0 to 27. This approach allows us to estimate differences in cognitive score across sleep-quality groups while also accounting for age and education. However, because the cognitive score is bounded between 0 and 27, we will assess whether the assumptions of linear regression are appropriate, particularly the normality and equal variance of the residuals. If these assumptions are substantially violated, we will consider an alternative generalized linear modeling approach that better accommodates the distribution of the cognitive score.
+
+**4.3 Model Assumptions**
+
+- Linearity - The relationship between predicted value and the predictors is linear
+
+- Independence - The observations are independent of one another.
+
+- Normality - The residuals are approximately normally distributed.
+
+- Equal variance - The residuals have approximately constant variance across predicted values.
+
+**4.4 Model Assessment (how will you assess the assumptions and model performance?)**
+
+- Linearity - Assess the residuals vs. fitted plot for a random cloud with no clear pattern.
+
+- Equal variance - Assess the residuals vs. fitted plot for a constant spread across the red line with no fanning behavior.
+
+- Independence - Check that the residuals do not show obvious clustering or systematic patterns.
+
+- Normality - Assess the Q-Q plot to see whether the residuals approximately follow a 45-degree diagonal line.
+
+\newpage
+
+#### Exploratory Data Analysis
+
+```{r}
+#| include: false
+# Load the RAND HRS longitudinal file (Stata format)
+# NOTE: this file is too large for GitHub; each member keeps a local copy
+hrs <- read_dta("randhrs1992_2022v2.dta")
+```
+
+```{r}
+# Create the subset of data for exploratory data analysis
+hrs_eda <- hrs %>%
+  dplyr::select(
+    r16cog27,     # Cognitive score
+    r16sleeprt,   # Feeling rested in the morning
+    r16agey_e,    # Age in years
+    raeduc        # Education category
+  )
+
+# Adjust the level for categorical variables
+hrs_eda <- hrs_eda %>%
+  mutate(
+    r16sleeprt = factor(
+      r16sleeprt,
+      levels = c(3, 2, 1),
+      labels = c("Low", "Medium", "High")
+    ),
+    raeduc = factor(
+      raeduc,
+      levels = c(1, 2, 3, 4, 5),
+      labels = c(
+        "Less than high school",
+        "GED",
+        "High school graduate",
+        "Some college",
+        "College and above"
+      )
+    )
+  )
+
+glimpse(hrs_eda)
+```
+
+```{r}
+#| include: false
+# Summary statistics (used to build the descriptive table below)
+# Cognitive Score
+summary(hrs_eda$r16cog27)
+mean(hrs_eda$r16cog27, na.rm = TRUE)
+sd(hrs_eda$r16cog27, na.rm = TRUE)
+
+# Sleep Quality
+table(hrs_eda$r16sleeprt, useNA = "ifany")
+prop.table(table(hrs_eda$r16sleeprt)) * 100
+
+# Age
+summary(hrs_eda$r16agey_e)
+mean(hrs_eda$r16agey_e, na.rm = TRUE)
+sd(hrs_eda$r16agey_e, na.rm = TRUE)
+
+# Education
+table(hrs_eda$raeduc, useNA = "ifany")
+prop.table(table(hrs_eda$raeduc)) * 100
+```
+
++-----------------+-------------------------+------------------+---------------+
+| **Variable**    | **Level**               | **Count, N (%)** | **Mean (SD)** |
++=================+=========================+=================:+==============:+
+| Cognitive score |                         | 15,201           | 15.05 (4.63)  |
++-----------------+-------------------------+------------------+---------------+
+| Age (years)     |                         | 15,787           | 67.73 (10.99) |
++-----------------+-------------------------+------------------+---------------+
+| Sleep quality   | Low (Rarely or never)   | 2,692 (17.1%)    |               |
++-----------------+-------------------------+------------------+---------------+
+|                 | Medium (Sometimes)      | 5,298 (33.7%)    |               |
++-----------------+-------------------------+------------------+---------------+
+|                 | High (Most of the time) | 7,719 (49.1%)    |               |
++-----------------+-------------------------+------------------+---------------+
+| Education level | Less than high school   | 11,210 (24.8%)   |               |
++-----------------+-------------------------+------------------+---------------+
+|                 | GED                     | 2,234 (4.9%)     |               |
++-----------------+-------------------------+------------------+---------------+
+|                 | High school graduate    | 12,493 (27.7%)   |               |
++-----------------+-------------------------+------------------+---------------+
+|                 | Some college            | 10,241 (22.7%)   |               |
++-----------------+-------------------------+------------------+---------------+
+|                 | College and above       | 8,963 (19.9%)    |               |
++-----------------+-------------------------+------------------+---------------+
+
+```{r}
+#| fig-height: 2.8
+#| fig-width: 6
+# Histogram for Cognitive Score
+ggplot(hrs_eda, aes(x = r16cog27)) +
+  geom_histogram(binwidth = 1, color = "white") +
+  labs(
+    title = "Distribution of Cognitive Scores",
+    x = "Cognitive Score",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+#| fig-height: 2.8
+#| fig-width: 6
+# Bar chart for quality of sleep
+ggplot(hrs_eda, aes(x = r16sleeprt)) +
+  geom_bar() +
+  labs(
+    title = "Distribution of Sleep Quality",
+    x = "Sleep Quality",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+#| fig-height: 2.8
+#| fig-width: 6
+# Box plot for sleep quality and cognitive score
+ggplot(hrs_eda, aes(x = r16sleeprt, y = r16cog27)) +
+  geom_boxplot() +
+  labs(
+    title = "Cognitive Score by Sleep Quality",
+    x = "Sleep Quality",
+    y = "Cognitive Score"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+#| fig-height: 2.8
+#| fig-width: 6
+# Scatter plot between Cognitive Score and Age (years)
+ggplot(hrs_eda, aes(x = r16agey_e, y = r16cog27)) +
+  geom_point(alpha = 0.25) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    title = "Cognitive Score by Age",
+    x = "Age (years)",
+    y = "Cognitive Score"
+  ) +
+  theme_minimal()
+```
+
+**Outcome:** Cognitive scores range from 0 to 27, with a mean of 15.05 (SD = 4.63). The distribution is roughly centered around a score of about 15, with relatively few observations at the lowest and highest values.
+
+**Key predictor:** Among respondents with available sleep-quality information, 49.1% reported high sleep quality, 33.7% reported medium sleep quality, and 17.1% reported low sleep quality.
+
+**Key relationship**
+
+- Based on the box plot, cognitive scores appear to be slightly higher among respondents who report better sleep quality. Respondents with high sleep quality have a slightly higher median cognitive score than those with medium or low sleep quality.
+
+- Scatter plot also demonstrates a clearer negative relationship with age. Overall, older respondents tend to have lower cognitive scores on average.
+
+**Missing Variables:** Many observations are missing for Wave 16 variables because not all respondents participated in the latest wave. We will account for this when defining the analytic sample and report how many observations remain after restricting the analysis to respondents with complete data for the variables included in the model.
+
+## Team Charter
+
+1.  When will you meet as a team to work on the project components? Will these meetings be held in person or virtually?
+
+    The meeting(s) will be held in person during weekdays at the university and/or via Zoom as required outside of academic operational hours.
+
+2.  What is your group policy on missing team meetings (e.g., how much advance notice should be provided)?
+
+    In the event of absence, the team member must communicate with the remainder of the team at least 24 hours in advance to reschedule accordingly.
+
+3.  How will your team communicate (email, Slack, text messages)? What is your policy on appropriate response time (within a certain number of hours? Nights/weekends?)?
+
+    The team will communicate regularly through Slack during regular working hours (9:00am-5:00pm). Weekend communication is permissible during appropriate hours as well.
