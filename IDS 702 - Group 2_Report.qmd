@@ -9,16 +9,56 @@ editor: visual
 ---
 
 ```{python}
+import pandas as pd
 
+# Import Stata dataset
+hrs = pd.read_stata(
+    "randhrs1992_2022v2.dta",
+    convert_categoricals=False
+)
+
+# Standardize column names to lowercase
+hrs.columns = hrs.columns.str.lower()
+
+# Keep identifiers
+id_cols = ["hhidpn", "rahhidpn", "hhid", "pn"]
+
+# Survey weight and design variables
+survey_cols = [
+    "r16wtresp",
+    "r16wtcrnh",
+    "raestrat",
+    "raehsamp",
+    "stratum",
+    "secu"
+]
+
+# Keep identifiers, survey design, all-wave, and Wave 16 variables
+selected_cols = [
+    col for col in hrs.columns
+    if col in id_cols
+    or col in survey_cols
+    or col.startswith(("ra", "sa", "ha", "r16", "s16", "h16"))
+]
+
+randhrs2022 = hrs[selected_cols].copy()
+
+# Drop rows where all R16 and S16 values are NaN
+rs16_cols = [
+    col for col in randhrs2022.columns
+    if col.startswith(("r16", "s16"))
+]
+
+randhrs2022 = randhrs2022.dropna(subset=rs16_cols, how="all")
+
+# Export updated dataset
+randhrs2022.to_csv("randhrs2022_v1.csv", index=False)
+
+# Check results
+print("Dataset shape:", randhrs2022.shape)
+
+randhrs2022.head()
 ```
-
-1.  
-
-    ## 
-
-2.  **Linear Regression and Diagnostics**
-
-3.  **Ordinal Regression and Diagnostics\**
 
 ## 1. Exploratory Data Analysis
 
@@ -80,27 +120,26 @@ print("Dataset shape:", randhrs2022.shape)
 randhrs2022.head()
 ```
 
-### 1.2 Set up survey weight design
+### 1.2 Import required library
 
 ```{r}
 # Import required library
 library(tidyverse)
 library(survey)
 library(srvyr)
+```
 
-hrs <- read_csv("randhrs2022_v1.csv", show_col_types = FALSE)
+### 1.3 Set up survey weight design
 
-# Retain respondents with valid survey weights and design variables
-hrs_weighted <- hrs %>%
+```{r}
+# Filter valid survey weights and create survey design
+hrs_weight <- hrs %>%
   filter(
     !is.na(r16wtcrnh),
     r16wtcrnh > 0,
     !is.na(rastratum),
     !is.na(rasecu)
-  )
-
-# Create complex survey design
-hrs_design <- hrs_weighted %>%
+  ) %>%
   as_survey_design(
     ids = rasecu,
     strata = rastratum,
@@ -110,23 +149,17 @@ hrs_design <- hrs_weighted %>%
 
 # Check sample size before and after filtering
 nrow(hrs)
-nrow(hrs_weighted)
+nrow(hrs_weight$variables)
 
-# Inspect survey design
-glimpse(hrs_design$variables)
+# Inspect data
+glimpse(hrs_weight$variables)
 ```
 
 ### 1.3 Adjust relevant categorical levels
 
 ```{r}
-# Adjust relevant categorical levels
-hrs_eda <- hrs_design %>%
-  select(
-    r16cog27,
-    r16sleeprt,
-    r16agey_e,
-    raeduc
-  ) %>%
+# Recode relevant categorical variables
+hrs_weight <- hrs_weight %>%
   mutate(
     r16sleeprt = factor(
       r16sleeprt,
@@ -146,12 +179,17 @@ hrs_eda <- hrs_design %>%
     )
   )
 
-# Inspect selected variables
-glimpse(hrs_eda$variables)
+# Inspect relevant variables
+hrs_weight$variables %>%
+  select(r16cog27, r16sleeprt, r16agey_e, raeduc) %>%
+  glimpse()
 
 # Check missing values (unweighted counts)
-hrs_eda$variables %>%
-  summarise(across(everything(), ~ sum(is.na(.x))))
+hrs_weight$variables %>%
+  summarise(across(
+    c(r16cog27, r16sleeprt, r16agey_e, raeduc),
+    ~ sum(is.na(.x))
+  ))
 ```
 
 \newpage
