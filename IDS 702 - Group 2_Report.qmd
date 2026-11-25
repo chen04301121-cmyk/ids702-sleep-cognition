@@ -192,8 +192,50 @@ hrs_weight$variables %>%
   ))
 ```
 
-```{r}
+### 1.4 Summary Statistics of Variables of Interest
 
+```{r}
+# Summary statistics (used to build the descriptive table below)
+# Cognitive Score
+hrs_weight %>%
+  summarise(
+    n = unweighted(sum(!is.na(r16cog27))),
+    mean = survey_mean(r16cog27, na.rm = TRUE, vartype = NULL),
+    sd = survey_sd(r16cog27, na.rm = TRUE, vartype = NULL)
+  )
+
+# Sleep Quality
+hrs_weight %>%
+  filter(!is.na(r16sleeprt)) %>%
+  group_by(r16sleeprt) %>%
+  summarise(
+    n = unweighted(n()),
+    percent = survey_mean(vartype = NULL) * 100
+  )
+
+# Age
+hrs_weight %>%
+  summarise(
+    n = unweighted(sum(!is.na(r16agey_e))),
+    mean = survey_mean(r16agey_e, na.rm = TRUE, vartype = NULL),
+    sd = survey_sd(r16agey_e, na.rm = TRUE, vartype = NULL)
+  )
+
+# Education
+hrs_weight %>%
+  filter(!is.na(raeduc)) %>%
+  group_by(raeduc) %>%
+  summarise(
+    n = unweighted(n()),
+    percent = survey_mean(vartype = NULL) * 100
+  )
+
+# Missing values (unweighted counts)
+hrs_weight$variables %>%
+  summarise(across(
+    c(r16cog27, r16sleeprt, r16agey_e, raeduc),
+    ~ sum(is.na(.x))
+  ))
 ```
 
 \newpage
@@ -345,47 +387,6 @@ We will use multiple linear regression because the outcome, cognitive score, is 
 \newpage
 
 #### Exploratory Data Analysis
-
-```{r}
-#| include: false
-# Load the RAND HRS longitudinal file (Stata format)
-# NOTE: this file is too large for GitHub; each member keeps a local copy
-hrs <- read_dta("randhrs1992_2022v2.dta")
-```
-
-```{r}
-# Create the subset of data for exploratory data analysis
-hrs_eda <- hrs %>%
-  dplyr::select(
-    r16cog27,     # Cognitive score
-    r16sleeprt,   # Feeling rested in the morning
-    r16agey_e,    # Age in years
-    raeduc        # Education category
-  )
-
-# Adjust the level for categorical variables
-hrs_eda <- hrs_eda %>%
-  mutate(
-    r16sleeprt = factor(
-      r16sleeprt,
-      levels = c(3, 2, 1),
-      labels = c("Low", "Medium", "High")
-    ),
-    raeduc = factor(
-      raeduc,
-      levels = c(1, 2, 3, 4, 5),
-      labels = c(
-        "Less than high school",
-        "GED",
-        "High school graduate",
-        "Some college",
-        "College and above"
-      )
-    )
-  )
-
-glimpse(hrs_eda)
-```
 
 ```{r}
 #| include: false
