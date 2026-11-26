@@ -238,6 +238,75 @@ hrs_weight$variables %>%
   ))
 ```
 
+```{r}
+#| fig-height: 2.8
+#| fig-width: 6
+
+# Weighted histogram for cognitive score
+ggplot(
+  hrs_weight$variables %>% filter(!is.na(r16cog27)),
+  aes(x = r16cog27, weight = r16wtcrnh)
+) +
+  geom_histogram(binwidth = 1, color = "white") +
+  labs(
+    title = "Distribution of Cognitive Scores",
+    x = "Cognitive Score",
+    y = "Weighted Count"
+  ) +
+  theme_minimal()
+
+# Weighted bar chart for sleep quality
+ggplot(
+  hrs_weight$variables %>% filter(!is.na(r16sleeprt)),
+  aes(x = r16sleeprt, weight = r16wtcrnh)
+) +
+  geom_bar() +
+  labs(
+    title = "Distribution of Sleep Quality",
+    x = "Sleep Quality",
+    y = "Weighted Count"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+#| fig-height: 2.8
+#| fig-width: 6
+
+# Survey-weighted boxplot for sleep quality and cognitive score
+ggplot(
+  hrs_weight$variables %>%
+    filter(!is.na(r16sleeprt), !is.na(r16cog27)),
+  aes(x = r16sleeprt, y = r16cog27, weight = r16wtcrnh)
+) +
+  geom_boxplot() +
+  labs(
+    title = "Cognitive Score by Sleep Quality",
+    x = "Sleep Quality",
+    y = "Cognitive Score"
+  ) +
+  theme_minimal()
+
+# Scatter plot with survey-weighted regression line
+ggplot(
+  hrs_weight$variables %>%
+    filter(!is.na(r16agey_e), !is.na(r16cog27)),
+  aes(x = r16agey_e, y = r16cog27)
+) +
+  geom_point(alpha = 0.25) +
+  geom_smooth(
+    aes(weight = r16wtcrnh),
+    method = "lm",
+    se = FALSE
+  ) +
+  labs(
+    title = "Cognitive Score by Age",
+    x = "Age (years)",
+    y = "Cognitive Score"
+  ) +
+  theme_minimal()
+```
+
 \newpage
 
 ## 2. **Linear Regression and Diagnostics**
@@ -342,102 +411,6 @@ We will use multiple linear regression because the outcome, cognitive score, is 
 - Independence - Check that the residuals do not show obvious clustering or systematic patterns.
 
 - Normality - Assess the Q-Q plot to see whether the residuals approximately follow a 45-degree diagonal line.
-
-\newpage
-
-#### Exploratory Data Analysis
-
-```{r}
-#| include: false
-# Summary statistics (used to build the descriptive table below)
-# Cognitive Score
-summary(hrs_eda$r16cog27)
-mean(hrs_eda$r16cog27, na.rm = TRUE)
-sd(hrs_eda$r16cog27, na.rm = TRUE)
-
-# Sleep Quality
-table(hrs_eda$r16sleeprt, useNA = "ifany")
-prop.table(table(hrs_eda$r16sleeprt)) * 100
-
-# Age
-summary(hrs_eda$r16agey_e)
-mean(hrs_eda$r16agey_e, na.rm = TRUE)
-sd(hrs_eda$r16agey_e, na.rm = TRUE)
-
-# Education
-table(hrs_eda$raeduc, useNA = "ifany")
-prop.table(table(hrs_eda$raeduc)) * 100
-```
-
-| **Variable**    | **Level**               | **Count, N (%)** | **Mean (SD)** |
-|-----------------|-------------------------|-----------------:|--------------:|
-| Cognitive score |                         |           15,201 |  15.05 (4.63) |
-| Age (years)     |                         |           15,787 | 67.73 (10.99) |
-| Sleep quality   | Low (Rarely or never)   |    2,692 (17.1%) |               |
-|                 | Medium (Sometimes)      |    5,298 (33.7%) |               |
-|                 | High (Most of the time) |    7,719 (49.1%) |               |
-| Education level | Less than high school   |   11,210 (24.8%) |               |
-|                 | GED                     |     2,234 (4.9%) |               |
-|                 | High school graduate    |   12,493 (27.7%) |               |
-|                 | Some college            |   10,241 (22.7%) |               |
-|                 | College and above       |    8,963 (19.9%) |               |
-
-```{r}
-#| fig-height: 2.8
-#| fig-width: 6
-# Histogram for Cognitive Score
-ggplot(hrs_eda, aes(x = r16cog27)) +
-  geom_histogram(binwidth = 1, color = "white") +
-  labs(
-    title = "Distribution of Cognitive Scores",
-    x = "Cognitive Score",
-    y = "Count"
-  ) +
-  theme_minimal()
-```
-
-```{r}
-#| fig-height: 2.8
-#| fig-width: 6
-# Bar chart for quality of sleep
-ggplot(hrs_eda, aes(x = r16sleeprt)) +
-  geom_bar() +
-  labs(
-    title = "Distribution of Sleep Quality",
-    x = "Sleep Quality",
-    y = "Count"
-  ) +
-  theme_minimal()
-```
-
-```{r}
-#| fig-height: 2.8
-#| fig-width: 6
-# Box plot for sleep quality and cognitive score
-ggplot(hrs_eda, aes(x = r16sleeprt, y = r16cog27)) +
-  geom_boxplot() +
-  labs(
-    title = "Cognitive Score by Sleep Quality",
-    x = "Sleep Quality",
-    y = "Cognitive Score"
-  ) +
-  theme_minimal()
-```
-
-```{r}
-#| fig-height: 2.8
-#| fig-width: 6
-# Scatter plot between Cognitive Score and Age (years)
-ggplot(hrs_eda, aes(x = r16agey_e, y = r16cog27)) +
-  geom_point(alpha = 0.25) +
-  geom_smooth(method = "lm", se = TRUE) +
-  labs(
-    title = "Cognitive Score by Age",
-    x = "Age (years)",
-    y = "Cognitive Score"
-  ) +
-  theme_minimal()
-```
 
 **Outcome:** Cognitive scores range from 0 to 27, with a mean of 15.05 (SD = 4.63). The distribution is roughly centered around a score of about 15, with relatively few observations at the lowest and highest values.
 
