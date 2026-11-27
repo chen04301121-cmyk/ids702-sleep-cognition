@@ -9,6 +9,7 @@ editor: visual
 ---
 
 ```{python}
+#| eval: false
 import pandas as pd
 
 # Import Stata dataset
@@ -65,6 +66,7 @@ randhrs2022.head()
 ### 1.1 Clean up raw dataset and select relevant columns
 
 ```{python}
+#| eval: false
 # Clean up raw dataset to extract
 # 1. Time-invariant variables
 # 2. Observations from wave 16
@@ -319,9 +321,248 @@ ggplot(
 
 ## 3. **Ordinal Regression and Diagnostics**
 
-```{r}
+### 3.1 Model specification
 
+As a complement to the linear model, we classify each respondent's 27-point cognitive score into the three Langa–Weir cognitive status categories commonly used with HRS data: dementia (0–6), cognitive impairment without dementia (CIND, 7–11), and normal cognition (12–27). These categories have a natural order, but the distances between them are not equal, so we fit a survey-weighted proportional odds (ordinal logistic) model:
+
+$$\begin{aligned}
+\text{logit}\, P(\text{Status}_i \le k)
+= \theta_k - \big[\,& \beta_1 \text{Sleep\_M}_i + \beta_2 \text{Sleep\_H}_i + \beta_3 \text{Age10}_i \\
+&+ \beta_4 \text{GED}_i + \beta_5 \text{HighSchool}_i + \beta_6 \text{SomeCollege}_i + \beta_7 \text{CollegeAbove}_i \\
+&+ \beta_8 (\text{Sleep\_M}_i \times \text{Age10}_i) + \beta_9 (\text{Sleep\_H}_i \times \text{Age10}_i) \big]
+\end{aligned}$$
+
+where:
+
+- $k \in \{\text{Dementia}, \text{CIND}\}$ indexes the two cut points, and $\theta_k$ are the cut-point intercepts.
+- $\text{Age10}_i = (\text{Age}_i - 65)/10$, so the sleep coefficients describe a 65-year-old and the age coefficient describes a 10-year difference in age.
+- Sleep quality (reference: low) and education (reference: less than high school) are coded as in the linear model.
+- $e^{\beta}$ is an odds ratio: values above 1 mean higher odds of being in a **better** cognitive category.
+- $e^{\beta_2}$ is the odds ratio for high vs. low sleep quality at age 65; the odds ratio at other ages is $e^{\beta_2 + \beta_9 \times \text{Age10}}$.
+
+The model uses the combined community and nursing-home weight (`r16wtcrnh`) with HRS strata and sampling error computation units, so estimates represent the U.S. population covered by HRS Wave 16 and standard errors account for the complex survey design.
+
+```{r}
+#| include: false
+# ============================================================
+# 3. Ordinal regression (Chen)
+# Requires: hrs_weight (survey design built in Section 1.3),
+#           with r16sleeprt and raeduc already recoded as factors
+# ============================================================
+library(MASS)   # polr(): unweighted ordinal model for comparison
+library(car)    # vif(): multicollinearity check
+# NOTE: MASS masks dplyr::select(); always write dplyr::select() below
+
+# Add the ordinal outcome and centered age to the design
+hrs_ord <- update(
+  hrs_weight,
+  cog_status = factor(
+    case_when(
+      r16cog27 <= 6  ~ "Dementia",   # Langa-Weir cutoffs
+      r16cog27 <= 11 ~ "CIND",
+      TRUE           ~ "Normal"
+    ),
+    levels  = c("Dementia", "CIND", "Normal"),
+    ordered = TRUE                    # worst -> best
+  ),
+  age10 = (r16agey_e - 65) / 10       # 0 = age 65, 1 unit = 10 years
+)
+
+# Complete cases on model variables (subset() keeps the design correct)
+hrs_ord <- subset(
+  hrs_ord,
+  !is.na(r16cog27) & !is.na(r16sleeprt) & !is.na(r16agey_e) & !is.na(raeduc)
+)
+
+n_ord <- nrow(hrs_ord$variables)
+
+# Weighted distribution of cognitive status
+status_pct <- prop.table(svytable(~ cog_status, hrs_ord)) * 100
 ```
+
+```{r}
+#| include: false
+# Weighted proportional odds model with the sleep x age interaction
+fit_ord <- svyolr(cog_status ~ r16sleeprt * age10 + raeduc, design = hrs_ord)
+
+est  <- coef(fit_ord)
+se   <- sqrt(diag(vcov(fit_ord)))
+keep <- !grepl("\\|", names(est))      # drop cut points such as "Dementia|CIND"
+
+# Readable labels for the report (no raw variable names)
+term_labels <- c(
+  "r16sleeprtMedium"           = "Medium sleep quality (vs. low)",
+  "r16sleeprtHigh"             = "High sleep quality (vs. low)",
+  "age10"                      = "Age (per 10 years)",
+  "raeducGED"                  = "GED (vs. less than high school)",
+  "raeducHigh school graduate" = "High school graduate",
+  "raeducSome college"         = "Some college",
+  "raeducCollege and above"    = "College and above",
+  "r16sleeprtMedium:age10"     = "Medium sleep x Age (per 10 years)",
+  "r16sleeprtHigh:age10"       = "High sleep x Age (per 10 years)"
+)
+
+or_table <- tibble(
+  Term       = term_labels[names(est)[keep]],
+  `Odds ratio` = exp(est[keep]),
+  `95% CI`   = sprintf("%.2f, %.2f",
+                       exp(est[keep] - 1.96 * se[keep]),
+                       exp(est[keep] + 1.96 * se[keep])),
+  `p-value`  = 2 * pnorm(-abs(est[keep] / se[keep]))
+)
+
+# Wald test for the sleep x age interaction as a whole
+int_test <- regTermTest(fit_ord, ~ r16sleeprt:age10)
+```
+
+```{r}
+# Table: odds ratios from the weighted ordinal model
+or_table %>%
+  mutate(
+    `Odds ratio` = sprintf("%.2f", `Odds ratio`),
+    `p-value`    = format.pval(`p-value`, digits = 2, eps = 0.001)
+  ) %>%
+  knitr::kable(
+    caption = "Survey-weighted proportional odds model: odds of being in a better cognitive status category"
+  )
+```
+
+### 3.2 Predicted probabilities
+
+```{r}
+#| fig-height: 3
+#| fig-width: 6
+# Predicted probability of normal cognition by age and sleep quality
+# (education fixed at high school graduate), computed from the weighted model
+beta <- est[keep]
+zeta <- est[!keep]
+
+pred_grid <- expand_grid(
+  r16sleeprt = factor(c("Low", "Medium", "High"), levels = c("Low", "Medium", "High")),
+  r16agey_e  = 55:90,
+  raeduc     = factor("High school graduate", levels = levels(hrs_ord$variables$raeduc))
+) %>%
+  mutate(age10 = (r16agey_e - 65) / 10)
+
+X <- model.matrix(~ r16sleeprt * age10 + raeduc, data = pred_grid)[, names(beta)]
+pred_grid$p_normal <- 1 - plogis(zeta["CIND|Normal"] - drop(X %*% beta))
+
+ggplot(pred_grid, aes(x = r16agey_e, y = p_normal, color = r16sleeprt)) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Predicted Probability of Normal Cognition",
+    x = "Age (years)",
+    y = "Probability of normal cognition",
+    color = "Sleep quality"
+  ) +
+  theme_minimal()
+```
+
+### 3.3 Model assessment
+
+```{r}
+#| include: false
+# (1) Proportional odds check: fit the two cumulative splits as separate
+#     weighted binary logistic models and compare their odds ratios
+hrs_ord <- update(
+  hrs_ord,
+  above_dementia = as.numeric(cog_status >= "CIND"),    # split 1: CIND or Normal vs. Dementia
+  normal         = as.numeric(cog_status == "Normal")   # split 2: Normal vs. Dementia or CIND
+)
+
+fit_split1 <- svyglm(above_dementia ~ r16sleeprt * age10 + raeduc,
+                     design = hrs_ord, family = quasibinomial())
+fit_split2 <- svyglm(normal ~ r16sleeprt * age10 + raeduc,
+                     design = hrs_ord, family = quasibinomial())
+
+# (2) Unweighted ordinal model, to see how much the survey weights matter
+fit_unw <- polr(cog_status ~ r16sleeprt * age10 + raeduc,
+                data = hrs_ord$variables, Hess = TRUE)
+
+# (3) Multicollinearity among main-effect predictors
+vif_tab <- vif(lm(r16cog27 ~ r16sleeprt + age10 + raeduc, data = hrs_ord$variables))
+```
+
+```{r}
+# Table: odds ratios across the ordinal model, the two binary splits,
+# and the unweighted ordinal model
+tibble(
+  Term                    = term_labels[names(beta)],
+  `Ordinal (weighted)`    = exp(beta),
+  `CIND+ vs. Dementia`    = exp(coef(fit_split1))[names(beta)],
+  `Normal vs. CIND/Dem.`  = exp(coef(fit_split2))[names(beta)],
+  `Ordinal (unweighted)`  = exp(coef(fit_unw))[names(beta)]
+) %>%
+  knitr::kable(
+    digits  = 2,
+    caption = "Proportional odds check and weighted vs. unweighted comparison (odds ratios)"
+  )
+```
+
+```{r}
+#| fig-height: 3
+#| fig-width: 7
+# Survey-weighted binned residual plots for the two cumulative splits
+# (each split of the ordinal outcome is a binary logistic model)
+binned_resid <- function(fit, label, n_bins = 40) {
+  tibble(
+    fitted = fitted(fit),                               # predicted probability
+    resid  = fit$y - fitted(fit),                       # observed minus predicted
+    w      = weights(fit$survey.design, "sampling")     # survey weights
+  ) %>%
+    mutate(bin = ntile(fitted, n_bins)) %>%             # group by predicted probability
+    group_by(bin) %>%
+    summarise(
+      mean_fitted = weighted.mean(fitted, w),
+      mean_resid  = weighted.mean(resid, w),
+      se          = 2 * sqrt(mean_fitted * (1 - mean_fitted) / n()),  # +/- 2 SE bounds
+      .groups = "drop"
+    ) %>%
+    mutate(split = label)
+}
+
+binned_df <- bind_rows(
+  binned_resid(fit_split1, "CIND or normal vs. dementia"),
+  binned_resid(fit_split2, "Normal vs. CIND or dementia")
+)
+
+# Share of bins inside the +/- 2 SE bounds, used in the text below
+pct_inside <- binned_df %>%
+  group_by(split) %>%
+  summarise(inside = 100 * mean(abs(mean_resid) <= se), .groups = "drop")
+
+ggplot(binned_df, aes(x = mean_fitted, y = mean_resid)) +
+  geom_point() +
+  geom_line(aes(y = se),  linetype = "dashed", color = "grey50") +
+  geom_line(aes(y = -se), linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = 0, color = "red") +
+  facet_wrap(~ split, scales = "free_x") +
+  labs(
+    title = "Binned Residual Plots",
+    x = "Average predicted probability",
+    y = "Average residual"
+  ) +
+  theme_minimal()
+```
+
+**Assumptions.** The proportional odds model assumes (1) an ordered outcome, (2) that each predictor has the same odds ratio at every cut point (proportional odds), (3) independent observations after accounting for the survey design, and (4) no severe multicollinearity. Independence is addressed by the design-based standard errors (strata and clusters), rather than by assuming a simple random sample.
+
+**Assessment.**
+
+- *Proportional odds:* We compared each predictor's odds ratio from the ordinal model with the odds ratios from two separate weighted logistic regressions, one for each cut point. For the main sleep and age effects, the second split (normal vs. CIND or dementia) closely matches the ordinal model, while the first split (any cognition above dementia vs. dementia) gives somewhat smaller sleep effects. Because only about 3% of the weighted population is classified as dementia, this split is estimated with much less precision, so we treat the proportional odds assumption as approximately reasonable for our main conclusions, but note it as a limitation.
+- *Interaction:* A design-based Wald test indicates that the sleep × age interaction improves the model (F = `r sprintf("%.2f", int_test$Ftest)`, p = `r format.pval(int_test$p, digits = 2)`).
+- *Model fit (binned residuals):* For each cumulative split, we grouped respondents into 40 bins by predicted probability and plotted the survey-weighted average residuals. About `r sprintf("%.0f", pct_inside$inside[1])`% of bins for the first split and `r sprintf("%.0f", pct_inside$inside[2])`% for the second split fall within the ±2 standard error bounds, and the residuals are scattered around zero without a systematic pattern, suggesting no major lack of fit.
+- *Multicollinearity:* Generalized VIFs for sleep quality, age, and education are all close to 1 (maximum `r sprintf("%.2f", max(vif_tab[, 1]))`), so collinearity is not a concern.
+- *Survey weights:* Unweighted estimates point in the same direction but are somewhat smaller for high sleep quality, which supports using the weighted model for population-level inference.
+
+### 3.4 Interpretation
+
+The analytic sample includes `r format(n_ord, big.mark = ",")` respondents with complete data. After weighting, about `r sprintf("%.1f", status_pct["Normal"])`% of the population has normal cognition, `r sprintf("%.1f", status_pct["CIND"])`% has CIND, and `r sprintf("%.1f", status_pct["Dementia"])`% falls in the dementia range.
+
+Holding education constant, at age 65 respondents who report high sleep quality have about `r sprintf("%.2f", exp(beta["r16sleeprtHigh"]))` times the odds of being in a better cognitive category than respondents with low sleep quality. The difference between medium and low sleep quality is smaller and not statistically significant. The significant high sleep × age interaction (OR = `r sprintf("%.2f", exp(beta["r16sleeprtHigh:age10"]))` per 10 years) indicates that the advantage associated with high sleep quality becomes smaller at older ages, which is also visible in the predicted probability plot, where the sleep-quality lines converge after about age 80. Education shows the strongest association with cognitive status, with college graduates having much higher odds of a better cognitive category than respondents without a high school diploma. These are cross-sectional associations and should not be interpreted as causal effects of sleep on cognition.
+
+\newpage
 
 ### Dataset Option 2 (For Reference to be deleted later)
 
@@ -357,8 +598,7 @@ We will also examine the distributions of age and education and use summary stat
 
 **4.2 Statistical Model (write in mathematical notation and define each term)**
 
-$$
-\begin{aligned}
+$$\begin{aligned}
 \text{CognitiveScore}_i
 =&\ \beta_0
 + \beta_1 \text{Sleep\_M}_i
@@ -371,8 +611,7 @@ $$
 &+ \beta_8(\text{Sleep\_M}_i \times \text{Age}_i)
 + \beta_9(\text{Sleep\_H}_i \times \text{Age}_i)
 + \epsilon_i
-\end{aligned}
-$$
+\end{aligned}$$
 
 Where:
 
