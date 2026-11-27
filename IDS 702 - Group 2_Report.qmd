@@ -8,59 +8,6 @@ execute:
 editor: visual
 ---
 
-```{python}
-#| eval: false
-import pandas as pd
-
-# Import Stata dataset
-hrs = pd.read_stata(
-    "randhrs1992_2022v2.dta",
-    convert_categoricals=False
-)
-
-# Standardize column names to lowercase
-hrs.columns = hrs.columns.str.lower()
-
-# Keep identifiers
-id_cols = ["hhidpn", "rahhidpn", "hhid", "pn"]
-
-# Survey weight and design variables
-survey_cols = [
-    "r16wtresp",
-    "r16wtcrnh",
-    "raestrat",
-    "raehsamp",
-    "stratum",
-    "secu"
-]
-
-# Keep identifiers, survey design, all-wave, and Wave 16 variables
-selected_cols = [
-    col for col in hrs.columns
-    if col in id_cols
-    or col in survey_cols
-    or col.startswith(("ra", "sa", "ha", "r16", "s16", "h16"))
-]
-
-randhrs2022 = hrs[selected_cols].copy()
-
-# Drop rows where all R16 and S16 values are NaN
-rs16_cols = [
-    col for col in randhrs2022.columns
-    if col.startswith(("r16", "s16"))
-]
-
-randhrs2022 = randhrs2022.dropna(subset=rs16_cols, how="all")
-
-# Export updated dataset
-randhrs2022.to_csv("randhrs2022_v1.csv", index=False)
-
-# Check results
-print("Dataset shape:", randhrs2022.shape)
-
-randhrs2022.head()
-```
-
 ## 1. Exploratory Data Analysis
 
 ### 1.1 Clean up raw dataset and select relevant columns
